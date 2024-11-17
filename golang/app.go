@@ -22,6 +22,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
+	"github.com/kaz/pprotein/integration"
 )
 
 var (
@@ -88,6 +89,12 @@ func dbInitialize() {
 	for _, sql := range sqls {
 		db.Exec(sql)
 	}
+
+	go func() {
+		if _, err := http.Get("http://192.168.0.15:9000/api/group/collect"); err != nil {
+			log.Printf("failed to communicate with pprotein: %v", err)
+		}
+	}()
 }
 
 func tryLogin(accountName, password string) *User {
@@ -830,6 +837,10 @@ func main() {
 	defer db.Close()
 
 	r := chi.NewRouter()
+
+	// 最終ベンチ走行時にコメントアウト
+	debugHandler := integration.NewDebugHandler()
+	r.HandleFunc("/debug/*", debugHandler.ServeHTTP)
 
 	r.Get("/initialize", getInitialize)
 	r.Get("/login", getLogin)
