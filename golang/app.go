@@ -187,7 +187,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 	var posts []Post
 
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+		err := db.Get(&p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -203,6 +203,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 		}
 
 		for i := 0; i < len(comments); i++ {
+			// TODO: cache user
 			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
 			if err != nil {
 				return nil, err
@@ -457,7 +458,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 	}
 
 	commentCount := 0
-	err = db.Get(&commentCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
+	err = db.Get(&commentCount, "SELECT COUNT(1) AS count FROM `comments` WHERE `user_id` = ?", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
@@ -485,7 +486,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 			args[i] = v
 		}
 
-		err = db.Get(&commentedCount, "SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
+		err = db.Get(&commentedCount, "SELECT COUNT(1) AS count FROM `comments` WHERE `post_id` IN ("+placeholder+")", args...)
 		if err != nil {
 			log.Print(err)
 			return
