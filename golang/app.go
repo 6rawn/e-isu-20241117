@@ -90,6 +90,11 @@ func dbInitialize() {
 		db.Exec(sql)
 	}
 
+	_, err := exec.Command("/bin/bash", "-c", "/home/isucon/private_isu/webapp/sql/init.sh").Output()
+	if err != nil {
+		log.Printf("failed to execute init.sh: %v", err)
+	}
+
 	go func() {
 		if _, err := http.Get("http://192.168.0.15:9000/api/group/collect"); err != nil {
 			log.Printf("failed to communicate with pprotein: %v", err)
