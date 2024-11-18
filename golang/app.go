@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -16,18 +18,24 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
-	gsm "github.com/bradleypeabody/gorilla-sessions-memcache"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	"github.com/kaz/pprotein/integration"
+	"github.com/rbcervilla/redisstore/v9"
 )
 
 var (
-	db    *sqlx.DB
-	store *gsm.MemcacheStore
+	db              *sqlx.DB
+	redisClient     *RedisClient
+	usersRepository *redisRepository[[]User]
+
+	userIdMap   map[int]User
+	userNameMap map[string]User
+
+	store *redisstore.RedisStore
+	users []User
 )
 
 const (
@@ -68,13 +76,14 @@ type Comment struct {
 }
 
 func init() {
-	memdAddr := os.Getenv("ISUCONP_MEMCACHED_ADDRESS")
-	if memdAddr == "" {
-		memdAddr = "localhost:11211"
+	ctx := context.Background()
+	redisClient = NewRedisClient(ctx)
+	var err error
+	store, err = redisstore.NewRedisStore(ctx, redisClient.client)
+	if err != nil {
+		log.Fatalf("Failed to create RedisStore: %v", err)
 	}
-	memcacheClient := memcache.New(memdAddr)
-	store = gsm.NewMemcacheStore(memcacheClient, "iscogram_", []byte("sendagaya"))
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	store.KeyPrefix("iscogram_")
 }
 
 func dbInitialize() {
@@ -203,10 +212,16 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 		}
 
 		for i := 0; i < len(comments); i++ {
-			// TODO: cache user
-			err := db.Get(&comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if err != nil {
-				return nil, err
+			user, ok := userIdMap[comments[i].UserID]
+			if ok {
+				comments[i].User = user
+			} else {
+				fetchUser()
+				user, ok = userIdMap[comments[i].UserID]
+				if !ok {
+					return nil, errors.New("user not found")
+				}
+				comments[i].User = user
 			}
 		}
 
@@ -217,10 +232,12 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 
 		p.Comments = comments
 
-		err = db.Get(&p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
+		user, ok := userIdMap[p.UserID]
+
+		if !ok {
+			return nil, errors.New("user not found")
 		}
+		p.User = user
 
 		p.CSRFToken = csrfToken
 
@@ -273,8 +290,36 @@ func getTemplPath(filename string) string {
 	return path.Join("templates", filename)
 }
 
+func fetchUser() {
+	usersRepository.cache.GetOrSet(context.Background(), "users", func(ctx context.Context) ([]User, error) {
+		users := []User{}
+		err := db.Select(&users, "SELECT * FROM `users`")
+		if err != nil {
+			return nil, err
+		}
+
+		userIdMap = make(map[int]User)
+		userNameMap = make(map[string]User)
+		for _, u := range users {
+			userIdMap[u.ID] = u
+			userNameMap[u.AccountName] = u
+		}
+
+		return users, nil
+	})
+}
+
 func getInitialize(w http.ResponseWriter, r *http.Request) {
 	dbInitialize()
+
+	usersRepository = NewRedisRepository[[]User](db, *redisClient)
+	go func() {
+		for {
+			fetchUser()
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
 	w.WriteHeader(http.StatusOK)
 }
 
