@@ -32,8 +32,10 @@ var (
 	db          *sqlx.DB
 	redisClient *redis.Client
 
-	store *redisstore.RedisStore
-	users sync.Map
+	store             *redisstore.RedisStore
+	usersCache        sync.Map
+	commentCountCache sync.Map
+	commentsCache     sync.Map
 )
 
 const (
@@ -84,7 +86,9 @@ func init() {
 
 	mutex := sync.Mutex{}
 	mutex.Lock()
-	users = sync.Map{}
+	usersCache = sync.Map{}
+	commentCountCache = sync.Map{}
+	commentsCache = sync.Map{}
 	mutex.Unlock()
 
 	store.KeyPrefix("iscogram_")
@@ -213,15 +217,30 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 	var posts []Post
 
 	for _, p := range results {
-		commentCountRepo := redis.NewRedisRepository[CommentCount](db, *redisClient)
-		_, err := commentCountRepo.GetCountByColumn(context.Background(), "post_id", strconv.Itoa(p.ID), "comments")
-		if err != nil {
-			return nil, err
+		// commentCountRepo := redis.NewRedisRepository[CommentCount](db, *redisClient)
+		// _, err := commentCountRepo.GetCountByColumn(context.Background(), "post_id", strconv.Itoa(p.ID), "comments")
+
+		newCommentCount, ok := commentCountCache.Load(p.ID)
+		if ok {
+			p.CommentCount = newCommentCount.(int)
+		} else {
+			err := db.Get(&p.CommentCount, "SELECT COUNT(1) as count FROM `comments` WHERE `post_id` = ?", p.ID)
+			if err != nil {
+				return nil, err
+			}
+			commentCountCache.Store(p.ID, p.CommentCount)
 		}
 
-		comments, err := redis.NewRedisRepository[[]Comment](db, *redisClient).SelectByColumn(context.Background(), "post_id", strconv.Itoa(p.ID), "comments")
-		if err != nil {
-			return nil, err
+		var comments []Comment
+		newComments, ok := commentsCache.Load(p.ID)
+		if ok {
+			comments = newComments.([]Comment)
+		} else {
+			err := db.Select(&comments, "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC", p.ID)
+			if err != nil {
+				return nil, err
+			}
+			commentsCache.Store(p.ID, comments)
 		}
 
 		if !allComments && len(comments) > 3 {
@@ -229,7 +248,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 		}
 
 		for i := 0; i < len(comments); i++ {
-			user, ok := users.Load(comments[i].UserID)
+			user, ok := usersCache.Load(comments[i].UserID)
 			if ok {
 				comments[i].User = user.(User)
 				continue
@@ -240,7 +259,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			if err != nil {
 				return nil, errors.New("user not found")
 			}
-			users.Store(comments[i].UserID, newUser)
+			usersCache.Store(comments[i].UserID, newUser)
 			comments[i].User = newUser
 		}
 
@@ -251,7 +270,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 
 		p.Comments = comments
 
-		user, ok := users.Load(p.UserID)
+		user, ok := usersCache.Load(p.UserID)
 		if ok {
 			p.User = user.(User)
 		} else {
@@ -260,7 +279,7 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			if err != nil {
 				return nil, errors.New("user not found")
 			}
-			users.Store(p.UserID, newUser)
+			usersCache.Store(p.UserID, newUser)
 			p.User = newUser
 		}
 
@@ -327,7 +346,7 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			for _, u := range newUsers {
-				users.Store(u.ID, u)
+				usersCache.Store(u.ID, u)
 			}
 			time.Sleep(5 * time.Second)
 		}
@@ -808,6 +827,8 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 		log.Print(err)
 		return
 	}
+	commentCountCache.Delete(postID)
+	commentsCache.Delete(postID)
 
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
