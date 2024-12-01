@@ -661,7 +661,7 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT * FROM `posts` WHERE `id` = ?", pid)
+	err = db.Select(&results, "SELECT posts.id, posts.user_id, posts.mime, posts.body, posts.created_at FROM posts INNER JOIN users ON posts.user_id = users.id WHERE users.del_flg = 0 and posts.id = ? LIMIT 20", pid)
 	if err != nil {
 		log.Print(err)
 		return
