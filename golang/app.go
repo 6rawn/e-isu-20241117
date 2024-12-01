@@ -18,8 +18,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/catatsuy/private-isu/webapp/golang/redis"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/goccy/go-json"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	"github.com/kaz/pprotein/integration"
@@ -28,11 +30,8 @@ import (
 
 var (
 	db              *sqlx.DB
-	redisClient     *RedisClient
-	usersRepository *redisRepository[[]User]
-
-	userIdMap   map[int]User
-	userNameMap map[string]User
+	redisClient     *redis.Client
+	usersRepository *redis.RedisRepository[[]User]
 
 	store *redisstore.RedisStore
 	users []User
@@ -77,9 +76,9 @@ type Comment struct {
 
 func init() {
 	ctx := context.Background()
-	redisClient = NewRedisClient(ctx)
+	redisClient = redis.NewClient(ctx)
 	var err error
-	store, err = redisstore.NewRedisStore(ctx, redisClient.client)
+	store, err = redisstore.NewRedisStore(ctx, redisClient.Client)
 	if err != nil {
 		log.Fatalf("Failed to create RedisStore: %v", err)
 	}
@@ -192,37 +191,54 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	}
 }
 
+func getUserById(users []User, id int) *User {
+	for _, u := range users {
+		if u.ID == id {
+			return &u
+		}
+	}
+	return nil
+}
+
+type CommentCount struct {
+	Count int `db:"count"`
+}
+
 func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, error) {
 	var posts []Post
 
 	for _, p := range results {
-		err := db.Get(&p.CommentCount, "SELECT COUNT(1) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
+		commentCountRepo := redis.NewRedisRepository[CommentCount](db, *redisClient)
+		_, err := commentCountRepo.GetCountByColumn(context.Background(), "post_id", strconv.Itoa(p.ID), "comments")
 		if err != nil {
 			return nil, err
 		}
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-		err = db.Select(&comments, query, p.ID)
+		comments, err := redis.NewRedisRepository[[]Comment](db, *redisClient).SelectByColumn(context.Background(), "post_id", strconv.Itoa(p.ID), "comments")
 		if err != nil {
 			return nil, err
 		}
 
+		if !allComments && len(comments) > 3 {
+			comments = comments[:3]
+		}
+
+		userRepo := redis.NewRedisRepository[User](db, *redisClient)
+
+		userCache := make(map[string]User)
 		for i := 0; i < len(comments); i++ {
-			user, ok := userIdMap[comments[i].UserID]
+			user, ok := userCache[strconv.Itoa(comments[i].UserID)]
 			if ok {
 				comments[i].User = user
-			} else {
-				fetchUser()
-				user, ok = userIdMap[comments[i].UserID]
-				if !ok {
-					return nil, errors.New("user not found")
-				}
-				comments[i].User = user
+				continue
 			}
+
+			user, err := userRepo.GetById(context.Background(), strconv.Itoa(comments[i].UserID), "users")
+			userCache[strconv.Itoa(user.ID)] = user
+			if err != nil {
+				return nil, errors.New("user not found")
+			}
+			comments[i].User = user
 		}
 
 		// reverse
@@ -232,20 +248,22 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 
 		p.Comments = comments
 
-		user, ok := userIdMap[p.UserID]
+		user, ok := userCache[strconv.Itoa(p.UserID)]
+		if ok {
+			p.User = user
+		} else {
+			user, err := userRepo.GetById(context.Background(), strconv.Itoa(p.UserID), "users")
+			if err != nil {
+				return nil, errors.New("user not found")
+			}
 
-		if !ok {
-			return nil, errors.New("user not found")
+			p.User = user
 		}
-		p.User = user
 
 		p.CSRFToken = csrfToken
 
 		if p.User.DelFlg == 0 {
 			posts = append(posts, p)
-		}
-		if len(posts) >= postsPerPage {
-			break
 		}
 	}
 
@@ -290,32 +308,33 @@ func getTemplPath(filename string) string {
 	return path.Join("templates", filename)
 }
 
-func fetchUser() {
-	usersRepository.cache.GetOrSet(context.Background(), "users", func(ctx context.Context) ([]User, error) {
-		users := []User{}
-		err := db.Select(&users, "SELECT * FROM `users`")
-		if err != nil {
-			return nil, err
-		}
-
-		userIdMap = make(map[int]User)
-		userNameMap = make(map[string]User)
-		for _, u := range users {
-			userIdMap[u.ID] = u
-			userNameMap[u.AccountName] = u
-		}
-
-		return users, nil
-	})
-}
-
 func getInitialize(w http.ResponseWriter, r *http.Request) {
+	redisClient.FlushDB()
+
 	dbInitialize()
 
-	usersRepository = NewRedisRepository[[]User](db, *redisClient)
+	usersRepository = redis.NewRedisRepository[[]User](db, *redisClient)
 	go func() {
 		for {
-			fetchUser()
+			users, err := usersRepository.Select(context.Background(), "users")
+			if err != nil {
+				log.Print(err)
+				continue
+			}
+			userMap := make(map[string]interface{}, len(users))
+			for _, u := range users {
+				cacheKey := fmt.Sprintf("%s:%s:%v", "users", "id", u.ID)
+				userBytes, err := json.Marshal(u)
+				if err != nil {
+					log.Print(err)
+					continue
+				}
+				userMap[cacheKey] = userBytes
+			}
+			err = usersRepository.Cache.Client.MSet(context.Background(), userMap)
+			if err != nil {
+				log.Print(err)
+			}
 			time.Sleep(5 * time.Second)
 		}
 	}()
@@ -490,7 +509,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	results := []Post{}
 
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC", user.ID)
+	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `user_id` = ? ORDER BY `created_at` DESC LIMIT 20", user.ID)
 	if err != nil {
 		log.Print(err)
 		return
@@ -578,7 +597,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := []Post{}
-	err = db.Select(&results, "SELECT `id`, `user_id`, `body`, `mime`, `created_at` FROM `posts` WHERE `created_at` <= ? ORDER BY `created_at` DESC", t.Format(ISO8601Format))
+	err = db.Select(&results, "SELECT posts.id, posts.user_id, posts.body, posts.mime, posts.created_at FROM posts INNER JOIN users ON posts.user_id = users.id WHERE users.del_flg = 0 AND posts.created_at <= ? ORDER BY posts.created_at DESC LIMIT 20", t.Format(ISO8601Format))
 	if err != nil {
 		log.Print(err)
 		return
