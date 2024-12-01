@@ -36,6 +36,53 @@ var (
 	usersCache        sync.Map
 	commentCountCache sync.Map
 	commentsCache     sync.Map
+
+	fmap = template.FuncMap{
+		"imageURL": imageURL,
+	}
+
+	getAdminBannedTemp = template.Must(template.ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("banned.html")),
+	)
+
+	loginTemp = template.Must(template.ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("login.html")),
+	)
+
+	registerTemp = template.Must(template.ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("register.html")),
+	)
+
+	indexTemp = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("index.html"),
+		getTemplPath("posts.html"),
+		getTemplPath("post.html"),
+	))
+
+	accountNameTemp = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("user.html"),
+		getTemplPath("posts.html"),
+		getTemplPath("post.html"),
+	))
+
+	postTemp = template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
+		getTemplPath("posts.html"),
+		getTemplPath("post.html"),
+	))
+
+	postsIdTemp = template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
+		getTemplPath("layout.html"),
+		getTemplPath("post_id.html"),
+		getTemplPath("post.html"),
+	))
+
+	accountNamePattern = regexp.MustCompile(`\A[0-9a-zA-Z_]{3,}\z`)
+	passwordPattern    = regexp.MustCompile(`\A[0-9a-zA-Z_]{6,}\z`)
 )
 
 const (
@@ -134,8 +181,7 @@ func tryLogin(accountName, password string) *User {
 }
 
 func validateUser(accountName, password string) bool {
-	return regexp.MustCompile(`\A[0-9a-zA-Z_]{3,}\z`).MatchString(accountName) &&
-		regexp.MustCompile(`\A[0-9a-zA-Z_]{6,}\z`).MatchString(password)
+	return accountNamePattern.MatchString(accountName) && passwordPattern.MatchString(password)
 }
 
 // 今回のGo実装では言語側のエスケープの仕組みが使えないのでOSコマンドインジェクション対策できない
@@ -363,10 +409,7 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("login.html")),
-	).Execute(w, struct {
+	loginTemp.Execute(w, struct {
 		Me    User
 		Flash string
 	}{me, getFlash(w, r, "notice")})
@@ -402,10 +445,7 @@ func getRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("register.html")),
-	).Execute(w, struct {
+	registerTemp.Execute(w, struct {
 		Me    User
 		Flash string
 	}{User{}, getFlash(w, r, "notice")})
@@ -488,16 +528,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("index.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	indexTemp.Execute(w, struct {
 		Posts     []Post
 		Me        User
 		CSRFToken string
@@ -572,16 +603,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("user.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	accountNameTemp.Execute(w, struct {
 		Posts          []Post
 		User           User
 		PostCount      int
@@ -627,14 +649,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, posts)
+	postTemp.Execute(w, posts)
 }
 
 func getPostsID(w http.ResponseWriter, r *http.Request) {
@@ -667,15 +682,7 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("post_id.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	postsIdTemp.Execute(w, struct {
 		Post Post
 		Me   User
 	}{p, me})
@@ -852,10 +859,7 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("banned.html")),
-	).Execute(w, struct {
+	getAdminBannedTemp.Execute(w, struct {
 		Users     []User
 		Me        User
 		CSRFToken string
