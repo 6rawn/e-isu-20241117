@@ -16,12 +16,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/catatsuy/private-isu/webapp/golang/redis"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/goccy/go-json"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	"github.com/kaz/pprotein/integration"
@@ -29,12 +29,11 @@ import (
 )
 
 var (
-	db              *sqlx.DB
-	redisClient     *redis.Client
-	usersRepository *redis.RedisRepository[[]User]
+	db          *sqlx.DB
+	redisClient *redis.Client
 
 	store *redisstore.RedisStore
-	users []User
+	users sync.Map
 )
 
 const (
@@ -82,6 +81,12 @@ func init() {
 	if err != nil {
 		log.Fatalf("Failed to create RedisStore: %v", err)
 	}
+
+	mutex := sync.Mutex{}
+	mutex.Lock()
+	users = sync.Map{}
+	mutex.Unlock()
+
 	store.KeyPrefix("iscogram_")
 }
 
@@ -223,22 +228,20 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 			comments = comments[:3]
 		}
 
-		userRepo := redis.NewRedisRepository[User](db, *redisClient)
-
-		userCache := make(map[string]User)
 		for i := 0; i < len(comments); i++ {
-			user, ok := userCache[strconv.Itoa(comments[i].UserID)]
+			user, ok := users.Load(comments[i].UserID)
 			if ok {
-				comments[i].User = user
+				comments[i].User = user.(User)
 				continue
 			}
 
-			user, err := userRepo.GetById(context.Background(), strconv.Itoa(comments[i].UserID), "users")
-			userCache[strconv.Itoa(user.ID)] = user
+			var newUser User
+			err := db.Get(&newUser, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
 			if err != nil {
 				return nil, errors.New("user not found")
 			}
-			comments[i].User = user
+			users.Store(comments[i].UserID, newUser)
+			comments[i].User = newUser
 		}
 
 		// reverse
@@ -248,16 +251,17 @@ func makePosts(results []Post, csrfToken string, allComments bool) ([]Post, erro
 
 		p.Comments = comments
 
-		user, ok := userCache[strconv.Itoa(p.UserID)]
+		user, ok := users.Load(p.UserID)
 		if ok {
-			p.User = user
+			p.User = user.(User)
 		} else {
-			user, err := userRepo.GetById(context.Background(), strconv.Itoa(p.UserID), "users")
+			var newUser User
+			err := db.Get(&newUser, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
 			if err != nil {
 				return nil, errors.New("user not found")
 			}
-
-			p.User = user
+			users.Store(p.UserID, newUser)
+			p.User = newUser
 		}
 
 		p.CSRFToken = csrfToken
@@ -313,27 +317,17 @@ func getInitialize(w http.ResponseWriter, r *http.Request) {
 
 	dbInitialize()
 
-	usersRepository = redis.NewRedisRepository[[]User](db, *redisClient)
 	go func() {
 		for {
-			users, err := usersRepository.Select(context.Background(), "users")
+			var newUsers []User
+			err := db.Select(&newUsers, "SELECT * FROM `users`")
 			if err != nil {
-				log.Print(err)
+				log.Println(err)
+				time.Sleep(5 * time.Second)
 				continue
 			}
-			userMap := make(map[string]interface{}, len(users))
-			for _, u := range users {
-				cacheKey := fmt.Sprintf("%s:%s:%v", "users", "id", u.ID)
-				userBytes, err := json.Marshal(u)
-				if err != nil {
-					log.Print(err)
-					continue
-				}
-				userMap[cacheKey] = userBytes
-			}
-			err = usersRepository.Cache.Client.MSet(context.Background(), userMap)
-			if err != nil {
-				log.Print(err)
+			for _, u := range newUsers {
+				users.Store(u.ID, u)
 			}
 			time.Sleep(5 * time.Second)
 		}
