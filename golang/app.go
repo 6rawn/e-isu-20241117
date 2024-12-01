@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	crand "crypto/rand"
+	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -210,13 +212,17 @@ func getSessionUser(r *http.Request) User {
 		return User{}
 	}
 
-	u := User{}
+	user, ok := usersCache.Load(uid)
+	if ok {
+		return user.(User)
+	}
 
+	u := User{}
 	err := db.Get(&u, "SELECT * FROM `users` WHERE `id` = ?", uid)
 	if err != nil {
 		return User{}
 	}
-
+	usersCache.Store(uid, u)
 	return u
 }
 
